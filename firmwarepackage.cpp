@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QtEndian>
 #include <QUuid>
 
 #include <array>
@@ -31,14 +32,29 @@ QString lzmaErrorText(lzma_ret code)
     }
 }
 
-bool hasEspImageMagic(const QString &path)
+bool hasEspImageMagic(const QByteArray &header)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
+    return !header.isEmpty()
+        && static_cast<unsigned char>(header.at(0)) == 0xE9;
+}
+
+bool hasStm32VectorTable(const QByteArray &header)
+{
+    if (header.size() < 8)
         return false;
 
-    const QByteArray first = file.read(1);
-    return first.size() == 1 && static_cast<unsigned char>(first.at(0)) == 0xE9;
+    const auto *data = reinterpret_cast<const uchar *>(header.constData());
+    const quint32 initialSp = qFromLittleEndian<quint32>(data);
+    const quint32 resetVector = qFromLittleEndian<quint32>(data + 4);
+
+    // Cortex-M applications normally start with an initial stack pointer in
+    // SRAM and a Thumb reset handler in internal flash.
+    const bool stackValid = initialSp >= 0x20000000U && initialSp < 0x40000000U;
+    const bool thumb = (resetVector & 0x1U) != 0;
+    const quint32 resetAddress = resetVector & ~quint32(0x1U);
+    const bool resetValid = resetAddress >= 0x08000000U && resetAddress < 0x10000000U;
+
+    return stackValid && thumb && resetValid;
 }
 
 } // namespace
@@ -60,10 +76,44 @@ FirmwarePackage::Result FirmwarePackage::prepare(const QString &sourcePath)
     return result;
 }
 
+bool FirmwarePackage::remove(const Result &result)
+{
+    // Never remove a source .bin supplied by the user. Only prepare()-created
+    // temporary files have temporary == true.
+    if (!result.temporary || result.path.isEmpty())
+        return true;
+
+    if (!QFile::exists(result.path))
+        return true;
+
+    return QFile::remove(result.path);
+}
+
 void FirmwarePackage::cleanup(const Result &result)
 {
-    if (result.temporary && !result.path.isEmpty())
-        QFile::remove(result.path);
+    remove(result);
+}
+
+FirmwarePackage::ImageType FirmwarePackage::detectImageType(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return ImageType::Unknown;
+
+    const QByteArray header = file.read(64);
+
+    if (hasEspImageMagic(header))
+        return ImageType::Esp32;
+
+    if (hasStm32VectorTable(header))
+        return ImageType::Stm32;
+
+    return ImageType::Unknown;
+}
+
+bool FirmwarePackage::isValidImage(const QString &path)
+{
+    return detectImageType(path) != ImageType::Unknown;
 }
 
 FirmwarePackage::Result FirmwarePackage::decompressXz(const QString &sourcePath)
@@ -169,11 +219,11 @@ FirmwarePackage::Result FirmwarePackage::decompressXz(const QString &sourcePath)
         return result;
     }
 
-    if (!hasEspImageMagic(outputPath)) {
+    if (!isValidImage(outputPath)) {
         QFile::remove(outputPath);
         result.error = QStringLiteral(
-            "После распаковки XZ получен файл, который не похож на ESP application image "
-            "(первый байт не 0xE9). Прошивка не отправлена.");
+            "После распаковки XZ получен файл, который не похож на поддерживаемый "
+            "ESP32/STM32 firmware image. Прошивка не отправлена.");
         return result;
     }
 
