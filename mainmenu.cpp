@@ -12,6 +12,7 @@ MainMenu::MainMenu(MainWindow *mainWindow)
     initEditMenu(p_menuBar);
     initViewMenu(p_menuBar);
     initPlcMenu(p_menuBar);
+    initSettingsMenu(p_menuBar);
     initHelpMenu(p_menuBar);
 
     connect(CommandManager::instance(), &CommandManager::activeConfDockWidgetChanged,
@@ -147,6 +148,18 @@ void MainMenu::initPlcMenu(QMenuBar *menuBar)
 {
     plcMenu = menuBar->addMenu("&ПЛК");
     connect(plcMenu, &QMenu::aboutToShow, this, &MainMenu::onPlcMenuAboutToShow);
+}
+
+void MainMenu::initSettingsMenu(QMenuBar *menuBar)
+{
+    QMenu *settingsMenu = menuBar->addMenu("&Настройки");
+
+    QAction *firmwareRepositoryAction = settingsMenu->addAction("Репозиторий прошивок...");
+    firmwareRepositoryAction->setStatusTip(
+        "Изменить корневой каталог репозитория LogicBox с папкой firmware");
+    connect(firmwareRepositoryAction, &QAction::triggered, this, [this]() {
+        p_mainWindow->editFirmwareRepositorySettings();
+    });
 }
 
 void MainMenu::initHelpMenu(QMenuBar *menuBar)

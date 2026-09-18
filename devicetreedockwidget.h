@@ -16,6 +16,8 @@ public:
     void updateDevice(const LogicBoxTarget &target,
                       const QMap<qsizetype,lbprocess::scaninfo>& scan);
     bool containsTarget(const LogicBoxTarget &target) const;
+    void editFirmwareRepository();
+    void reloadFirmwareRepositoryFromSettings(bool showErrors = true);
 
 signals:
     void requestConfig(const LogicBoxTarget &target);
@@ -51,15 +53,13 @@ private:
     QStandardItem *versionInfoItem(QStandardItem *moduleItem) const;
 
     bool ensureFirmwareRepository();
-    bool chooseFirmwareRepository();
+    bool chooseFirmwareRepository(bool allowClear = false);
     bool loadFirmwareRepository(const QString &repositoryRoot, bool showErrors);
-
-    QString settingsFilePath() const;
-    QString savedFirmwareRepository() const;
-    void saveFirmwareRepository(const QString &repositoryRoot) const;
+    void clearFirmwareRepository();
 
     void updateFirmwareStatus(QStandardItem *moduleItem);
     void updateAllFirmwareStatuses();
+    void clearAllFirmwareStatuses();
 
     // inline QString toBold(const QString &text);
 };

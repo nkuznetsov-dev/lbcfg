@@ -2,15 +2,14 @@
 #include <QVBoxLayout>
 #include <QMenu>
 #include <QMessageBox>
-#include <QFileDialog>
-#include <QSettings>
-#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QBrush>
 #include <QColor>
 #include "logmanager.h"
 #include "commandmanager.h"
+#include "appsettings.h"
+#include "firmwarerepositorydialog.h"
 
 DeviceTreeDockWidget::DeviceTreeDockWidget(QWidget *parent)
     : QDockWidget("Tree View", parent), lbplc(plcManager::instanse())
@@ -190,9 +189,7 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
 
         QAction *repositoryAction = menu.addAction("Репозиторий прошивок...");
         connect(repositoryAction, &QAction::triggered, this, [this]() {
-            m_repositoryPromptDeclined = false;
-            if (chooseFirmwareRepository())
-                updateAllFirmwareStatuses();
+            editFirmwareRepository();
         });
 
         QAction *refreshRepositoryAction = menu.addAction("Обновить версии из репозитория");
@@ -201,11 +198,10 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
 
             QString repositoryRoot = m_repositoryRoot;
             if (repositoryRoot.isEmpty())
-                repositoryRoot = savedFirmwareRepository();
+                repositoryRoot = AppSettings::firmwareRepositoryRoot();
 
             if (repositoryRoot.isEmpty()) {
-                if (chooseFirmwareRepository())
-                    updateAllFirmwareStatuses();
+                editFirmwareRepository();
                 return;
             }
 
@@ -313,7 +309,7 @@ bool DeviceTreeDockWidget::ensureFirmwareRepository()
 
     QString repositoryRoot = m_repositoryRoot;
     if (repositoryRoot.isEmpty())
-        repositoryRoot = savedFirmwareRepository();
+        repositoryRoot = AppSettings::firmwareRepositoryRoot();
 
     if (!repositoryRoot.isEmpty() && loadFirmwareRepository(repositoryRoot, false))
         return true;
@@ -321,36 +317,73 @@ bool DeviceTreeDockWidget::ensureFirmwareRepository()
     if (m_repositoryPromptDeclined)
         return false;
 
-    return chooseFirmwareRepository();
+    // Expanding a module must never throw the user straight into Explorer.
+    // First show an explicit settings dialog with the current path and a
+    // separate "Browse" button. The folder picker is opened only by request.
+    return chooseFirmwareRepository(false);
 }
 
-bool DeviceTreeDockWidget::chooseFirmwareRepository()
+bool DeviceTreeDockWidget::chooseFirmwareRepository(bool allowClear)
 {
     QString initialPath = m_repositoryRoot;
     if (initialPath.isEmpty())
-        initialPath = savedFirmwareRepository();
-    if (initialPath.isEmpty() || !QFileInfo(initialPath).isDir())
-        initialPath = QDir::homePath();
+        initialPath = AppSettings::firmwareRepositoryRoot();
 
-    const QString selected = QFileDialog::getExistingDirectory(
-        this,
-        "Выберите каталог репозитория LogicBox",
-        initialPath,
-        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    while (true) {
+        FirmwareRepositoryDialog dialog(initialPath, allowClear, this);
+        if (dialog.exec() != QDialog::Accepted) {
+            // Do not ask again for every module expanded in the same session.
+            m_repositoryPromptDeclined = true;
+            return false;
+        }
 
-    if (selected.isEmpty()) {
-        // Do not ask again for every module expanded in the same session.
-        m_repositoryPromptDeclined = true;
-        return false;
+        const QString selected = dialog.repositoryPath();
+        if (selected.isEmpty() && allowClear) {
+            clearFirmwareRepository();
+            m_repositoryPromptDeclined = false;
+            return true;
+        }
+
+        if (loadFirmwareRepository(selected, true)) {
+            m_repositoryPromptDeclined = false;
+            return true;
+        }
+
+        // The basic directory structure was already checked by the dialog.
+        // If the analyzer rejects the repository, keep the entered path and
+        // return to the same dialog instead of forcing the user to start over.
+        initialPath = selected;
     }
+}
 
-    if (!loadFirmwareRepository(selected, true)) {
-        m_repositoryPromptDeclined = true;
-        return false;
-    }
-
+void DeviceTreeDockWidget::editFirmwareRepository()
+{
     m_repositoryPromptDeclined = false;
-    return true;
+    if (chooseFirmwareRepository(true) && m_firmwareLoaded)
+        updateAllFirmwareStatuses();
+}
+
+void DeviceTreeDockWidget::reloadFirmwareRepositoryFromSettings(bool showErrors)
+{
+    m_repositoryPromptDeclined = false;
+    m_firmwareLoaded = false;
+    m_repositoryRoot.clear();
+    clearAllFirmwareStatuses();
+
+    const QString repositoryRoot = AppSettings::firmwareRepositoryRoot();
+    if (repositoryRoot.isEmpty())
+        return;
+
+    if (loadFirmwareRepository(repositoryRoot, showErrors))
+        updateAllFirmwareStatuses();
+}
+
+void DeviceTreeDockWidget::clearFirmwareRepository()
+{
+    AppSettings::clearFirmwareRepositoryRoot();
+    m_repositoryRoot.clear();
+    m_firmwareLoaded = false;
+    clearAllFirmwareStatuses();
 }
 
 bool DeviceTreeDockWidget::loadFirmwareRepository(const QString &repositoryRoot,
@@ -410,7 +443,7 @@ bool DeviceTreeDockWidget::loadFirmwareRepository(const QString &repositoryRoot,
 
     m_repositoryRoot = repositoryInfo.absoluteFilePath();
     m_firmwareLoaded = true;
-    saveFirmwareRepository(m_repositoryRoot);
+    AppSettings::setFirmwareRepositoryRoot(m_repositoryRoot);
 
     const QList<firmwareAnalyzer::fwinfo> rejected =
         m_firmwareAnalyzer->getRejectedFirmware();
@@ -420,32 +453,6 @@ bool DeviceTreeDockWidget::loadFirmwareRepository(const QString &repositoryRoot,
     }
 
     return true;
-}
-
-QString DeviceTreeDockWidget::settingsFilePath() const
-{
-    // Intentionally build-local. Incremental rebuilds keep the path, deleting
-    // the whole build directory removes it together with the executable.
-    return QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("lbcfg.ini"));
-}
-
-QString DeviceTreeDockWidget::savedFirmwareRepository() const
-{
-    QSettings settings(settingsFilePath(), QSettings::IniFormat);
-    return settings.value(QStringLiteral("Firmware/repositoryRoot")).toString();
-}
-
-void DeviceTreeDockWidget::saveFirmwareRepository(const QString &repositoryRoot) const
-{
-    QSettings settings(settingsFilePath(), QSettings::IniFormat);
-    settings.setValue(QStringLiteral("Firmware/repositoryRoot"), repositoryRoot);
-    settings.sync();
-
-    if (settings.status() != QSettings::NoError) {
-        debugApp() << "Failed to save firmware repository path to"
-                   << settingsFilePath();
-    }
 }
 
 void DeviceTreeDockWidget::updateFirmwareStatus(QStandardItem *moduleItem)
@@ -508,6 +515,26 @@ void DeviceTreeDockWidget::updateFirmwareStatus(QStandardItem *moduleItem)
                  matches ? QStringLiteral("версии совпадают")
                          : QStringLiteral("версии не совпадают"),
                  repositoryFirmware.sourcePath));
+}
+
+void DeviceTreeDockWidget::clearAllFirmwareStatuses()
+{
+    for (int rootRow = 0; rootRow < treeModel->rowCount(); ++rootRow) {
+        QStandardItem *root = treeModel->item(rootRow);
+        if (!root)
+            continue;
+
+        for (int moduleRow = 0; moduleRow < root->rowCount(); ++moduleRow) {
+            QStandardItem *moduleItem = root->child(moduleRow);
+            if (!moduleItem || !moduleItem->data(ModuleItemRole).toBool())
+                continue;
+
+            if (QStandardItem *versionItem = versionInfoItem(moduleItem)) {
+                versionItem->setBackground(QBrush());
+                versionItem->setToolTip(QStringLiteral("Репозиторий прошивок не настроен"));
+            }
+        }
+    }
 }
 
 void DeviceTreeDockWidget::updateAllFirmwareStatuses()

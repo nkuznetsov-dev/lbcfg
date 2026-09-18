@@ -3,6 +3,7 @@
 #include <QStatusBar>
 #include <QLabel>
 #include <QFileDialog>
+#include <QDir>
 #include <QApplication>
 #include <QHelpEvent>
 #include <QToolTip>
@@ -10,6 +11,8 @@
 #include <QMessageBox>
 #include "commandmanager.h"
 #include "firmwarepackage.h"
+#include "appsettings.h"
+#include "firmwarerepositorydialog.h"
 
 
 
@@ -376,6 +379,32 @@ WatchDockWidget *MainWindow::createWatchDockWidget(const LogicBoxTarget &target)
         });
     }
     return dock;
+}
+
+
+void MainWindow::editFirmwareRepositorySettings()
+{
+    FirmwareRepositoryDialog dialog(AppSettings::firmwareRepositoryRoot(), true, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const QString repositoryRoot = dialog.repositoryPath();
+    if (repositoryRoot.isEmpty()) {
+        AppSettings::clearFirmwareRepositoryRoot();
+        if (treeDock)
+            treeDock->reloadFirmwareRepositoryFromSettings(false);
+        statusBar()->showMessage(QStringLiteral("Путь к репозиторию прошивок сброшен"), 5000);
+        return;
+    }
+
+    AppSettings::setFirmwareRepositoryRoot(repositoryRoot);
+    if (treeDock)
+        treeDock->reloadFirmwareRepositoryFromSettings(true);
+
+    statusBar()->showMessage(
+        QStringLiteral("Репозиторий прошивок: %1")
+            .arg(QDir::toNativeSeparators(repositoryRoot)),
+        5000);
 }
 
 QList<ConfigDockWidget *> MainWindow::getConfigDocks() const
