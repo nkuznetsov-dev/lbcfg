@@ -12,6 +12,7 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QStandardPaths>
+#include <QInputDialog>
 #include "logmanager.h"
 #include "mainwindow.h"
 
@@ -263,6 +264,70 @@ void ConfigDockWidget::onTextChanged()
 }
 
 
+void ConfigDockWidget::setBoundTarget(const LogicBoxTarget &target)
+{
+    boundTarget = target;
+}
+
+bool ConfigDockWidget::resolveTargetForSelection(const QString &name,
+                                                   const QString &mac,
+                                                   LogicBoxTarget *target)
+{
+    if (!target || !lbplc)
+        return false;
+
+    LogicBoxTarget macProbe;
+    macProbe.mac = mac;
+    if (boundTarget.isValid()
+        && boundTarget.name.compare(name, Qt::CaseInsensitive) == 0
+        && (mac.trimmed().isEmpty()
+            || boundTarget.normalizedMac() == macProbe.normalizedMac())) {
+        *target = boundTarget;
+        return true;
+    }
+
+    const auto status = lbplc->resolveTarget(name, mac, target);
+    if (status == plcManager::ResolveStatus::Found) {
+        boundTarget = *target;
+        return true;
+    }
+
+    if (status == plcManager::ResolveStatus::NotFound) {
+        QMessageBox::warning(this, "Endpoint не найден",
+                             QString("Для ПЛК %1 не найден scoped endpoint. "
+                                     "Сначала выполните Discover.").arg(name));
+        return false;
+    }
+
+    const QList<LogicBoxTarget> candidates = lbplc->targetsForIdentity(name, mac);
+    QStringList choices;
+    for (const LogicBoxTarget &candidate : candidates)
+        choices << candidate.endpoint.displayString();
+
+    bool ok = false;
+    const QString selected = QInputDialog::getItem(
+        this,
+        "Выбор сетевого интерфейса",
+        QString("ПЛК %1 доступен несколькими маршрутами. Выберите endpoint:").arg(name),
+        choices,
+        0,
+        false,
+        &ok);
+    if (!ok || selected.isEmpty())
+        return false;
+
+    const int selectedIndex = choices.indexOf(selected);
+    if (selectedIndex < 0 || selectedIndex >= candidates.size())
+        return false;
+
+    *target = candidates.at(selectedIndex);
+    target->name = name;
+    if (!mac.trimmed().isEmpty())
+        target->mac = mac;
+    boundTarget = *target;
+    return true;
+}
+
 void ConfigDockWidget::onConfigureClicked()
 {
     int result = isModifiedPages(true);
@@ -281,6 +346,7 @@ void ConfigDockWidget::onConfigureClicked()
     // Восстанавливаем позицию
     int index = plcSelector->findText(currentSelected);
     plcSelector->setCurrentIndex(index); // Если index == -1, Qt сам покажет placeholder
+    plcSelector->blockSignals(false);
 
     // int currentRow = plcSelector->currentIndex();
     if (index < 0) {
@@ -292,7 +358,7 @@ void ConfigDockWidget::onConfigureClicked()
     // QString selectedPlc = plcSelector->currentText();
     QStandardItemModel* model = qobject_cast<QStandardItemModel*>(plcSelector->model());
     QString mac;
-    if (model) {
+    if (model && model->item(index, 1)) {
         mac = model->item(index, 1)->text();
         debugApp() << "Запуск конфигурации для:" << currentSelected << "с MAC-адресом:" << mac;
     }
@@ -315,8 +381,13 @@ void ConfigDockWidget::onConfigureClicked()
             return;
         }
     }
-    if (lbplc)
-        lbplc->startConf(currentSelected, currentFilePath);
+    if (!lbplc)
+        return;
+
+    LogicBoxTarget target;
+    if (!resolveTargetForSelection(currentSelected, mac, &target))
+        return;
+    lbplc->startConf(target, currentFilePath);
 }
 
 QList<QAction *> ConfigDockWidget::activeTextActions() const
@@ -499,36 +570,40 @@ void ConfigDockWidget::onSidebarRowChanged(int index)
 
 void ConfigDockWidget::onAddVariableToWatch(const QString &varName)
 {
-    QString currentPlc = plcSelector->currentText();
+    const QString currentPlc = plcSelector->currentText();
     if (currentPlc.isEmpty()) {
-        QMessageBox::warning(this,
-                             "Внимание",
-                             "Не выбрана конфигурация");
+        QMessageBox::warning(this, "Внимание", "Не выбрана конфигурация");
         return;
     }
-    int index = plcSelector->findText(currentPlc);
-    QStandardItemModel* model = qobject_cast<QStandardItemModel*>(plcSelector->model());
-    QString ipv6 = lbyaml::MacToIPv6(model->item(index, 1)->text());
-    auto watches = p_mainWindow->getWatchDocks();
-    WatchDockWidget* watch = nullptr;
-    if (!watches.isEmpty())
-    {
-        for (auto w : watches) {
-            if (w->getPlcName() == currentPlc){
-                watch = w;
-                break;
-            }
+
+    const int index = plcSelector->findText(currentPlc);
+    QStandardItemModel *model = qobject_cast<QStandardItemModel*>(plcSelector->model());
+    const QString mac = (model && index >= 0 && model->item(index, 1))
+        ? model->item(index, 1)->text() : QString();
+
+    LogicBoxTarget watchTarget;
+    if (!resolveTargetForSelection(currentPlc, mac, &watchTarget))
+        return;
+
+    WatchDockWidget *watch = nullptr;
+    for (WatchDockWidget *candidate : p_mainWindow->getWatchDocks()) {
+        if (candidate && candidate->getTarget().routeKey() == watchTarget.routeKey()) {
+            watch = candidate;
+            break;
         }
     }
-    if (!watch){
-        debugApp() << "onAddVariableToWatch: New Watch" << ipv6 << plcName << varName;
-        watch = p_mainWindow->createWatchDockWidget(plcName, ipv6);
+
+    if (!watch) {
+        debugApp() << "onAddVariableToWatch: New Watch"
+                   << watchTarget.endpoint.displayString() << currentPlc << varName;
+        watch = p_mainWindow->createWatchDockWidget(watchTarget);
         watch->addVar(varName);
         watch->toggleConnection();
-    }else{
-        debugApp() << "onAddVariableToWatch:" << ipv6 << plcName << varName;
+    } else {
+        debugApp() << "onAddVariableToWatch:"
+                   << watchTarget.endpoint.displayString() << currentPlc << varName;
         watch->addVar(varName);
-        if (!plcManager::instanse()->activeWatchKeys().contains(currentPlc))
+        if (!watch->isConnected())
             watch->toggleConnection();
     }
     watch->show();

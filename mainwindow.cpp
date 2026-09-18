@@ -98,7 +98,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(lbplc, &plcManager::firmwareStarted, this, [this]
             (const plcManager::CommandContext &ctx, const QString &message){
-                debugApp()<<"plcManager::firmwareStarted"<<ctx.ipv6<<ctx.name;
+                debugApp()<<"plcManager::firmwareStarted"<<ctx.target.endpoint.displayString()<<ctx.target.name;
                 this->statusBar()->showMessage(message);
                 fwWidget->showStatus();
             });
@@ -290,15 +290,15 @@ DeviceTreeDockWidget *MainWindow::createTreeDockWidget()
                 }
             });
     connect(treeDock, &DeviceTreeDockWidget::requestUpdate,
-            lbplc, &plcManager::scanDevice);
+            this, [this](const LogicBoxTarget &target){ lbplc->scanDevice(target); });
     connect(treeDock, &DeviceTreeDockWidget::requestConfig,
-            lbplc, &plcManager::requestConfig);
+            this, [this](const LogicBoxTarget &target){ lbplc->requestConfig(target); });
 
     connect(lbplc, &plcManager::scanCompleted, this, [this]
-            (const QString &ipv6, const QString &name, const QMap<qsizetype, lbprocess::scaninfo> &scanData){
+            (const LogicBoxTarget &target, const QMap<qsizetype, lbprocess::scaninfo> &scanData){
         if (!treeDock)
             createTreeDockWidget();
-        treeDock->updateDevice(ipv6, name, scanData);
+        treeDock->updateDevice(target, scanData);
         treeDock->show();
         treeDock->raise();
         treeDock->setFocus();
@@ -318,14 +318,13 @@ DiscoverDockWidget *MainWindow::createDiscoverDockWidget()
     discoverDock->setWindowTitle("Discover");
     discoverDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     connect(discoverDock, &DiscoverDockWidget::newConfig,
-            this, [this] (const QString &ipv6, const QString &name){
-                CreateConfig(ipv6, name);
-            }
-            );
+            this, [this] (const LogicBoxTarget &target){
+                CreateConfig(target);
+            });
     connect(discoverDock, &DiscoverDockWidget::deviceSelected,
-            lbplc, &plcManager::scanDevice);
+            this, [this](const LogicBoxTarget &target){ lbplc->scanDevice(target); });
     connect(discoverDock, &DiscoverDockWidget::requestConfig,
-            lbplc, &plcManager::requestConfig);
+            this, [this](const LogicBoxTarget &target){ lbplc->requestConfig(target); });
 
     tabifyDockWidgetTo(discoverDock, Qt::RightDockWidgetArea);
     return discoverDock.get();
@@ -353,22 +352,27 @@ LogDockWidget *MainWindow::createLogDockWidget()
     return logDock.get();
 }
 
-WatchDockWidget *MainWindow::createWatchDockWidget(const QString &name, const QString &ipv6)
+WatchDockWidget *MainWindow::createWatchDockWidget(const LogicBoxTarget &target)
 {
+    const QString key = target.routeKey();
     WatchDockWidget* dock = nullptr;
-    if (watchDocks.contains(name))
-        dock = watchDocks[name];
-    else{
-        dock = new WatchDockWidget(name, this);
+    for (WatchDockWidget *existing : watchDocks) {
+        if (existing && existing->getTarget().routeKey() == key) {
+            dock = existing;
+            break;
+        }
+    }
+    if (dock) {
+        dock->setTarget(target);
+    } else {
+        dock = new WatchDockWidget(target, this);
         dock->setAttribute(Qt::WA_DeleteOnClose);
-        if (!ipv6.isEmpty())
-            dock->setIpv6(ipv6);
-        watchDocks.insert(name, dock);
+        watchDocks.insert(key, dock);
         tabifyDockWidgetTo(dock, Qt::LeftDockWidgetArea);
 
-        connect(dock, &QObject::destroyed, this, [this, name]() {
-            debugApp() << "destroy WatchDockWidget: "<<name;
-            watchDocks.remove(name);
+        connect(dock, &QObject::destroyed, this, [this, key]() {
+            debugApp() << "destroy WatchDockWidget:" << key;
+            watchDocks.remove(key);
         });
     }
     return dock;
@@ -389,13 +393,14 @@ QPointer<LogDockWidget> MainWindow::getLogDock() const
     return logDock;
 }
 
-void MainWindow::CreateConfig(const QString &ipv6, const QString &name, const QString &content)
+void MainWindow::CreateConfig(const LogicBoxTarget &target, const QString &content)
 {
-    ConfigDockWidget* dock = CreateConfDockWidget(ipv6, name);
+    const QString key = target.isValid() ? target.routeKey() : QUuid::createUuid().toString();
+    ConfigDockWidget* dock = CreateConfDockWidget(key, target.displayName());
+    dock->setBoundTarget(target);
     dock->setConfig(content);
     dock->show();
     dock->raise();
-    // dock->setFocus();
 }
 
 QList<QDockWidget *> MainWindow::getDocksInArea(Qt::DockWidgetArea area) const
@@ -434,8 +439,8 @@ void MainWindow::tabifyDockWidgetTo(QDockWidget *dock, Qt::DockWidgetArea area)
     }
 }
 
-void MainWindow::checkTreeAndStartScan(const QString &ipv6, const QString &name)
+void MainWindow::checkTreeAndStartScan(const LogicBoxTarget &target)
 {
-    if(!(treeDock->containsName(name)))
-        lbplc->scanDevice(ipv6, name);
+    if (!treeDock || !treeDock->containsTarget(target))
+        lbplc->scanDevice(target);
 }

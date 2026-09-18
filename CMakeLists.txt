@@ -49,6 +49,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         devicetreedockwidget.h devicetreedockwidget.cpp
         configdockwidget.h configdockwidget.cpp
         plcmanager.h plcmanager.cpp
+        logicboxtarget.h
         firmwarewidget.h firmwarewidget.cpp
         commandmanager.h commandmanager.cpp
         mainmenu.h mainmenu.cpp

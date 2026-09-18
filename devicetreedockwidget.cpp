@@ -35,9 +35,11 @@ DeviceTreeDockWidget::DeviceTreeDockWidget(QWidget *parent)
     connect(treeView, &QTreeView::doubleClicked, this,
             [this](const QModelIndex &index){
                 if (!index.isValid()) return;
-                if (!index.parent().isValid())
-                    emit requestConfig(index.data(Qt::UserRole).toString(),
-                                       index.data().toString());
+                if (!index.parent().isValid()) {
+                    const LogicBoxTarget target = index.data(TargetRole).value<LogicBoxTarget>();
+                    if (target.isValid())
+                        emit requestConfig(target);
+                }
             }
             );
     connect(lbplc, &plcManager::showMessage, this, [this](const QString &title, const QString &message){
@@ -46,73 +48,60 @@ DeviceTreeDockWidget::DeviceTreeDockWidget(QWidget *parent)
     connect(lbplc, &plcManager::restartAllCompleted, this, [this]
             (const plcManager::CommandContext &ctx){
                 QMessageBox::information(this, "Перезагрузить все",
-                                         QString("Команда на перезагрузку всех модулей %1 отправлена").arg(ctx.name));
+                                         QString("Команда на перезагрузку всех модулей %1 отправлена").arg(ctx.target.name));
             });
 }
 
-void DeviceTreeDockWidget::updateDevice(const QString &ipv6, const QString &name, const QMap<qsizetype, lbprocess::scaninfo> &scan)
+void DeviceTreeDockWidget::updateDevice(const LogicBoxTarget &target,
+                                        const QMap<qsizetype, lbprocess::scaninfo> &scan)
 {
-    QStandardItem* plcRoot = findPlcRoot(ipv6);
+    QStandardItem* plcRoot = findPlcRoot(target);
     QModelIndex rootIndex;
 
-    // Если не нашли, создаем новый корень
     if (!plcRoot) {
-        plcRoot = new QStandardItem(name);
-        plcRoot->setData(ipv6, Qt::UserRole); // Прячем ID для поиска в будущем
+        plcRoot = new QStandardItem(target.name);
+        plcRoot->setData(QVariant::fromValue(target), TargetRole);
         QFont rootFont = plcRoot->font();
         rootFont.setBold(true);
-        rootFont.setPointSize(rootFont.pointSize());
         plcRoot->setFont(rootFont);
         treeModel->appendRow(plcRoot);
         rootIndex = treeModel->index(treeModel->rowCount() - 1, 0);
-    }else{
+    } else {
         plcRoot->removeRows(0, plcRoot->rowCount());
-        plcRoot->setText(name);
+        plcRoot->setText(target.name);
+        plcRoot->setData(QVariant::fromValue(target), TargetRole);
         rootIndex = plcRoot->index();
     }
 
-    // Итерируем по результатам сканирования
     for (auto it = scan.begin(); it != scan.end(); ++it) {
         const auto &info = it.value();
-        // Создаем элементы для двух колонок
         QStandardItem *col1 = new QStandardItem(QString("Slot %1: %2").arg(it.key()).arg(info.devtype));
-        col1->setData(it.key(), Qt::UserRole);
+        col1->setData(it.key(), SlotRole);
         col1->setData(info.devtype, ModuleTypeRole);
         col1->setData(info.version, InstalledVersionRole);
         col1->setData(true, ModuleItemRole);
-        // 2. Делаем их жирными
         QFont boldFont = col1->font();
         boldFont.setBold(true);
         col1->setFont(boldFont);
         if (info.master)
             col1->setText(col1->text() + " [MASTER]");
-        // Добавляем их в модель как одну строку
         plcRoot->appendRow(col1);
-        // Теперь добавляем подробности ВНУТРЬ (как подветки)
         col1->appendRow(new QStandardItem("MAC: " + info.mac));
 
         QStandardItem *versionItem = new QStandardItem("Version: " + info.version);
         versionItem->setData(true, VersionInfoRole);
         col1->appendRow(versionItem);
-
         col1->appendRow(new QStandardItem("Serial: " + info.data.value(0)));
 
         if (m_firmwareLoaded)
             updateFirmwareStatus(col1);
     }
-    // Раскрываем дерево
     treeView->expand(rootIndex);
 }
 
-bool DeviceTreeDockWidget::containsName(const QString &name)
+bool DeviceTreeDockWidget::containsTarget(const LogicBoxTarget &target) const
 {
-    // qDebug()<<"into DeviceTreeDockWidget::contains "<<name;
-    for (int i = 0; i < treeModel->rowCount(); ++i) {
-        auto *item = treeModel->item(i);
-        if (item->text() == name)
-            return true;
-    }
-    return false;
+    return findPlcRoot(target) != nullptr;
 }
 
 void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
@@ -130,31 +119,31 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
 
     plcManager::CommandContext ctx;
     if (isRoot) {
-        ctx.name = index.data().toString();
-        ctx.ipv6 = index.data(Qt::UserRole).toString();
+        ctx.target = index.data(TargetRole).value<LogicBoxTarget>();
     } else {
-        ctx.name = index.parent().data().toString();
-        ctx.ipv6 = index.parent().data(Qt::UserRole).toString();
-        ctx.slot = index.data(Qt::UserRole).toInt();
+        ctx.target = index.parent().data(TargetRole).value<LogicBoxTarget>();
+        ctx.slot = index.data(SlotRole).toInt();
     }
+    if (!ctx.target.isValid())
+        return;
 
     QMenu menu(this);
     // --- Только для Устройства ---
     if (isRoot) {
-        QAction *getConfigAction = menu.addAction(QString("Запросить конфигурацию у %1").arg(ctx.name));
+        QAction *getConfigAction = menu.addAction(QString("Запросить конфигурацию у %1").arg(ctx.target.name));
         QFont font = getConfigAction->font();
         font.setBold(true);
         getConfigAction->setFont(font);
         connect(getConfigAction, &QAction::triggered, this, [this, ctx]() {
-            emit requestConfig(ctx.ipv6, ctx.name);
+            emit requestConfig(ctx.target);
         });
 
         QAction *update = menu.addAction("Обновить");
         connect(update, &QAction::triggered, this, [this, ctx](){
-            emit requestUpdate(ctx.ipv6, ctx.name);
+            emit requestUpdate(ctx.target);
         });
 
-        QAction *removeAction = menu.addAction(QString("Удалить %1").arg(ctx.name));
+        QAction *removeAction = menu.addAction(QString("Удалить %1").arg(ctx.target.name));
         connect(removeAction, &QAction::triggered, this, [this, index]() {
             treeModel->removeRow(index.row());
         });
@@ -170,27 +159,27 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
         connect(fsformat, &QAction::triggered, this, [this, ctx](){
             auto reply = QMessageBox::question(this,
                                                "Подтверждение сброса",
-                                               QString("Вы уверены, что хотите сбросить устройство %1 к заводским настройкам?").arg(ctx.name),
+                                               QString("Вы уверены, что хотите сбросить устройство %1 к заводским настройкам?").arg(ctx.target.name),
                                                QMessageBox::Yes | QMessageBox::No,
                                                QMessageBox::No); // Кнопка по умолчанию
             if (reply == QMessageBox::Yes)
                 lbplc->lbc_executeCommand(ctx, {"fsformat"}, "Сброс к заводским", [ctx, this] (const QStringList& res){
                     return QString("%1 сброшено к заводским настройкам. Требуется перезагрузка.")
-                        .arg(ctx.name);
+                        .arg(ctx.target.name);
                 });
         });
 
-        QAction *flashAll = menu.addAction(QString("Прошить все модули %1").arg(ctx.name));
+        QAction *flashAll = menu.addAction(QString("Прошить все модули %1").arg(ctx.target.name));
         connect(flashAll, &QAction::triggered, this, [this, ctx](){
             emit requestFlashAll(ctx);
         });
 
-        QAction *fboot = menu.addAction(QString("Загрузить fboot в %1").arg(ctx.name));
+        QAction *fboot = menu.addAction(QString("Загрузить fboot в %1").arg(ctx.target.name));
         connect(fboot, &QAction::triggered, this, [this, ctx](){
             emit requestFboot(ctx);
         });
 
-        QAction *nofboot = menu.addAction(QString("Удалить fboot в %1").arg(ctx.name));
+        QAction *nofboot = menu.addAction(QString("Удалить fboot в %1").arg(ctx.target.name));
         connect(nofboot, &QAction::triggered, this, [this, ctx]() {
             lbplc->lbc_executeCommand(ctx, {"nofboot"}, "Удалить fboot", [ctx](const QStringList&) {
                 return QString("Команда на удаление fboot %1 отправлена").arg(ctx.displayName());
@@ -539,11 +528,14 @@ void DeviceTreeDockWidget::updateAllFirmwareStatuses()
     }
 }
 
-QStandardItem *DeviceTreeDockWidget::findPlcRoot(const QString &ipv6)
+QStandardItem *DeviceTreeDockWidget::findPlcRoot(const LogicBoxTarget &target) const
 {
     for (int i = 0; i < treeModel->rowCount(); ++i) {
-        auto *item = treeModel->item(i);
-        if (item->data(Qt::UserRole).toString() == ipv6)
+        QStandardItem *item = treeModel->item(i);
+        if (!item)
+            continue;
+        const LogicBoxTarget existing = item->data(TargetRole).value<LogicBoxTarget>();
+        if (existing.isValid() && existing.sameRoute(target))
             return item;
     }
     return nullptr;

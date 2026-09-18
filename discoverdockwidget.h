@@ -18,9 +18,9 @@ public:
     QMap<QString, discover::lbinfo> getLdmap() const;
 
 signals:
-    void deviceSelected(const QString& ipv6, const QString& name);
-    void requestConfig(const QString& ipv6, const QString& name);
-    void newConfig(const QString& ipv6, const QString& name);
+    void deviceSelected(const LogicBoxTarget &target);
+    void requestConfig(const LogicBoxTarget &target);
+    void newConfig(const LogicBoxTarget &target);
 
 private slots:
     void cleanRow();
@@ -34,6 +34,7 @@ private:
     QTableWidget* table = nullptr;
     discover* wgtdiscover = nullptr;
     QMap<QString, discover::lbinfo> ldmap;
+    LogicBoxTarget targetForRow(int row) const;
 
     bool discoverRunning = false;
 

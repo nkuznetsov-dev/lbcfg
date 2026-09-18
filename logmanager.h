@@ -86,14 +86,14 @@ inline LogManager logApp(LogCatcher::Level level = LogCatcher::Info) {
 inline LogManager logPLC(const QString &name = QString(), LogCatcher::Level level = LogCatcher::Info,
                          LogCatcher::Wrapped wrap = LogCatcher::wrapNo) {
     plcManager::CommandContext ctx;
-    ctx.name = name;
+    ctx.target.name = name;
     return LogManager(ctx, LogCatcher::PLC, level, wrap);
 }
 
 
 inline LogManager debugPLC(const QString &name = QString()) {
     plcManager::CommandContext ctx;
-    ctx.name = name;
+    ctx.target.name = name;
     return LogManager(ctx, LogCatcher::PLC, LogCatcher::Debug);
 }
 

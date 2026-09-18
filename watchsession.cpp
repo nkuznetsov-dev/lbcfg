@@ -5,9 +5,9 @@
 WatchSession::WatchSession(const plcManager::CommandContext &ctx,
                            const QStringList &arg,
                            QObject *parent)
-    : QObject{parent}, m_key(ctx.name)
+    : QObject{parent}, m_key(ctx.target.routeKey())
 {
-    const LbEndpoint endpoint = ctx.resolvedEndpoint(502);
+    const LbEndpoint endpoint = ctx.target.endpoint;
     debugApp() << "WatchSession::Starting process for:"
                << m_key << endpoint.displayString();
 

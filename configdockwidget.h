@@ -31,6 +31,7 @@ public:
 
     QString getCurrentFilePath() const;
     QString getPlcName() const;
+    void setBoundTarget(const LogicBoxTarget &target);
 
     void onConfigureClicked();
     QList<QAction*> activeTextActions() const;
@@ -39,7 +40,6 @@ public:
 
 signals:
     // void getSaveFile();
-    void updateScan(const QString& ipv6, const QString& name);
 
 private slots:
     void onTextChanged();
@@ -72,6 +72,7 @@ private:
     QString originalYaml;
     bool modified = false;
     QString plcName;
+    LogicBoxTarget boundTarget;
     bool writeFile(const QString &filePath);
 
     QString currentFilePath;
@@ -81,6 +82,8 @@ private:
     // Слот для обработки переключения страниц
     void onSidebarRowChanged(int index);
     void onAddVariableToWatch(const QString &varName);
+    bool resolveTargetForSelection(const QString &name, const QString &mac,
+                                   LogicBoxTarget *target);
 
     bool replacePlcBlockInYaml(const QString& newPlcBlockText);
     int isModifiedPages(bool allowCancel = false);

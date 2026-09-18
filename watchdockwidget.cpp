@@ -6,13 +6,14 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
+#include <QMessageBox>
 #include "logmanager.h"
 #include "plcmanager.h"
 
 
 
-WatchDockWidget::WatchDockWidget(const QString &name, QWidget *parent)
-    : QDockWidget{QString("Watch: %1").arg(name), parent}, plcname(name)
+WatchDockWidget::WatchDockWidget(const LogicBoxTarget &initialTarget, QWidget *parent)
+    : QDockWidget{QString("Watch: %1").arg(initialTarget.displayName()), parent}, target(initialTarget)
 {
     QWidget *container = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(container);
@@ -187,21 +188,45 @@ WatchDockWidget::WatchDockWidget(const QString &name, QWidget *parent)
 
 QString WatchDockWidget::getPlcName() const
 {
-    return plcname;
+    return target.name;
 }
 
-void WatchDockWidget::setIpv6(const QString &newIpv6)
+const LogicBoxTarget &WatchDockWidget::getTarget() const
 {
-    ipv6 = newIpv6;
-    debugApp()<<"WatchDockWidget set IP:"<<ipv6;
+    return target;
+}
+
+void WatchDockWidget::setTarget(const LogicBoxTarget &newTarget)
+{
+    target = newTarget;
+    setWindowTitle(QString("Watch: %1").arg(target.displayName()));
+    debugApp() << "WatchDockWidget set target:"
+               << target.name << target.endpoint.displayString();
+}
+
+bool WatchDockWidget::setEndpointText(const QString &text)
+{
+    const LbEndpoint endpoint = LbEndpoint::fromString(text, 502);
+    if (!endpoint.isValid()) {
+        debugApp() << "WatchDockWidget rejected endpoint:" << text;
+        return false;
+    }
+    target.endpoint = endpoint;
+    return true;
 }
 
 void WatchDockWidget::showIpEditDialog(QPushButton *anchorButton)
 {
+    if (isConnected()) {
+        QMessageBox::information(this, "Watch подключён",
+                                 "Сначала отключите Watch, затем измените endpoint.");
+        return;
+    }
+
     QLineEdit *ipEdit = new QLineEdit(this);
     ipEdit->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     ipEdit->setAttribute(Qt::WA_DeleteOnClose);
-    ipEdit->setText(this->ipv6);
+    ipEdit->setText(target.endpoint.isValid() ? target.endpoint.displayString() : QString());
     ipEdit->setPlaceholderText("Enter IP...");
     ipEdit->setMinimumWidth(150);
 
@@ -212,9 +237,9 @@ void WatchDockWidget::showIpEditDialog(QPushButton *anchorButton)
 
     connect(ipEdit, &QLineEdit::returnPressed, this, [this, ipEdit](){
         QString text = ipEdit->text().trimmed();
-        if (!text.isEmpty()) {
-            this->setIpv6(text);
-            // Здесь можно вызвать сигнал или лог, что IP изменен
+        if (!text.isEmpty() && !this->setEndpointText(text)) {
+            QMessageBox::warning(this, "Некорректный endpoint",
+                                 "Для IPv6 link-local необходимо указать scope интерфейса, например fe80::...%45");
         }
         ipEdit->close();
     });
@@ -232,14 +257,15 @@ void WatchDockWidget::toggleConnection()
     }
 
     plcManager::CommandContext ctx;
-    ctx.ipv6 = ipv6;
-    ctx.name = plcname;
+    ctx.target = target;
 
     QStringList param = collectVariables();
 
     WatchSession *old_session = session;
 
     session = plcManager::instanse()->startWatch(ctx, param, this);
+    if (!session)
+        return;
     if (session != old_session){
         connect(session, &WatchSession::watchExeComleted, this, &WatchDockWidget::receiveData);
         connect(session, &WatchSession::connected, this, [this](){
@@ -302,7 +328,7 @@ bool WatchDockWidget::eventFilter(QObject *watched, QEvent *event)
 
 void WatchDockWidget::receiveData(const QStringList &data)
 {
-    debugApp()<<"data receive from:"<< plcname << data;
+    debugApp()<<"data receive from:"<< target.name << data;
     for (int i = 0; i < data.size(); ++i) {
         if (i < watchModel->rowCount()) {
             QStandardItem *valueItem = watchModel->item(i, 1);

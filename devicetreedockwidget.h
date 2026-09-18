@@ -13,13 +13,13 @@ class DeviceTreeDockWidget : public QDockWidget
     Q_OBJECT
 public:
     explicit DeviceTreeDockWidget(QWidget *parent = nullptr);
-    void updateDevice(const QString& ipv6, const QString& name,
+    void updateDevice(const LogicBoxTarget &target,
                       const QMap<qsizetype,lbprocess::scaninfo>& scan);
-    bool containsName(const QString& name);
+    bool containsTarget(const LogicBoxTarget &target) const;
 
 signals:
-    void requestConfig(const QString& ipv6, const QString& name);
-    void requestUpdate(const QString& ipv6, const QString& name);
+    void requestConfig(const LogicBoxTarget &target);
+    void requestUpdate(const LogicBoxTarget &target);
     // void requestFlash(const plcManager::CommandContext &ctx);
     void requestFlashAll(const plcManager::CommandContext &ctx);
     void requestFboot(const plcManager::CommandContext &ctx);
@@ -30,7 +30,9 @@ private slots:
 
 private:
     enum ItemRole {
-        ModuleTypeRole = Qt::UserRole + 1,
+        TargetRole = Qt::UserRole + 1,
+        SlotRole,
+        ModuleTypeRole,
         InstalledVersionRole,
         ModuleItemRole,
         VersionInfoRole
@@ -45,7 +47,7 @@ private:
     bool m_repositoryPromptDeclined = false;
     QString m_repositoryRoot;
 
-    QStandardItem *findPlcRoot(const QString& ipv6);
+    QStandardItem *findPlcRoot(const LogicBoxTarget &target) const;
     QStandardItem *versionInfoItem(QStandardItem *moduleItem) const;
 
     bool ensureFirmwareRepository();

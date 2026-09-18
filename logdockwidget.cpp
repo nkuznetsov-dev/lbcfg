@@ -177,7 +177,7 @@ void LogDockWidget::appendLogEntry(const QDateTime &timestamp,
                                     QString("<br><span style='white-space: pre-wrap;'>%1</span>")
                                         .arg(message.toHtmlEscaped()):message.toHtmlEscaped())
                            .arg(timeColor)
-                           .arg(ctx.isSlot()?QString("%1 slot %2").arg(ctx.name).arg(ctx.slot):ctx.name);
+                           .arg(ctx.isSlot()?QString("%1 slot %2").arg(ctx.target.name).arg(ctx.slot):ctx.target.name);
     if (isAutoScrollEnabled) {
         logViewer->appendHtml(htmlLine);
     } else {

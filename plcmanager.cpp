@@ -4,7 +4,10 @@
 
 
 plcManager::plcManager()
-{}
+{
+    qRegisterMetaType<LogicBoxTarget>("LogicBoxTarget");
+    qRegisterMetaType<CommandContext>("plcManager::CommandContext");
+}
 
 QString plcManager::normalizeMac(QString mac)
 {
@@ -17,81 +20,109 @@ QString plcManager::normalizeMac(QString mac)
 
 LbEndpoint plcManager::endpointFromHost(const QString &host, quint16 endpointPort)
 {
-    QString value = host.trimmed();
-    quint16 parsedPort = endpointPort;
+    return LbEndpoint::fromString(host, endpointPort);
+}
 
-    if (value.startsWith('[')) {
-        const int closing = value.indexOf(']');
-        if (closing > 0) {
-            const QString suffix = value.mid(closing + 1);
-            if (suffix.startsWith(':')) {
-                bool ok = false;
-                const int p = suffix.mid(1).toInt(&ok);
-                if (ok && p > 0 && p < 65536)
-                    parsedPort = static_cast<quint16>(p);
-            }
-            value = value.mid(1, closing - 1);
+void plcManager::appendUniqueTarget(QList<LogicBoxTarget> &list,
+                                    const LogicBoxTarget &target)
+{
+    for (LogicBoxTarget &existing : list) {
+        if (existing.sameRoute(target)) {
+            if (!target.name.trimmed().isEmpty())
+                existing.name = target.name;
+            if (!target.mac.trimmed().isEmpty())
+                existing.mac = target.mac;
+            return;
         }
     }
-
-    LbEndpoint endpoint;
-    endpoint.address.setAddress(value);
-    endpoint.port = parsedPort;
-    return endpoint;
+    list.append(target);
 }
 
-void plcManager::rememberEndpoint(const QString &name, const QString &mac,
-                                  const LbEndpoint &endpoint)
+void plcManager::rememberTarget(const LogicBoxTarget &target)
 {
-    if (!endpoint.isValid())
+    if (!target.isValid())
         return;
 
-    if (!name.trimmed().isEmpty() && name != "noname")
-        endpointsByName.insert(name.trimmed(), endpoint);
+    const QString nameKey = target.name.trimmed().toLower();
+    if (!nameKey.isEmpty() && nameKey.compare("noname", Qt::CaseInsensitive) != 0)
+        appendUniqueTarget(targetsByName[nameKey], target);
 
-    const QString normalizedMac = normalizeMac(mac);
-    if (!normalizedMac.isEmpty() && normalizedMac != "unknown")
-        endpointsByMac.insert(normalizedMac, endpoint);
+    const QString macKey = normalizeMac(target.mac);
+    if (!macKey.isEmpty() && macKey != "unknown")
+        appendUniqueTarget(targetsByMac[macKey], target);
 }
 
-LbEndpoint plcManager::endpointForIdentity(const QString &name,
-                                           const QString &mac) const
+QList<LogicBoxTarget> plcManager::targetsForIdentity(const QString &name,
+                                                         const QString &mac) const
 {
-    const QString normalizedMac = normalizeMac(mac);
-    if (!normalizedMac.isEmpty()) {
-        const LbEndpoint byMac = endpointsByMac.value(normalizedMac);
-        if (byMac.isValid())
-            return byMac;
+    QList<LogicBoxTarget> candidates;
+    const QString macKey = normalizeMac(mac);
+    if (!macKey.isEmpty())
+        candidates = targetsByMac.value(macKey);
+
+    if (candidates.isEmpty() && !name.trimmed().isEmpty())
+        candidates = targetsByName.value(name.trimmed().toLower());
+
+    QList<LogicBoxTarget> valid;
+    for (const LogicBoxTarget &candidate : candidates) {
+        if (!candidate.isValid())
+            continue;
+        bool duplicate = false;
+        for (const LogicBoxTarget &existing : valid) {
+            if (existing.sameRoute(candidate)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+            valid.append(candidate);
     }
-
-    const LbEndpoint byName = endpointsByName.value(name.trimmed());
-    if (byName.isValid())
-        return byName;
-
-    return {};
+    return valid;
 }
 
-void plcManager::scanDevice(const QString &ipv6, const QString &name)
+plcManager::ResolveStatus plcManager::resolveTarget(const QString &name,
+                                                     const QString &mac,
+                                                     LogicBoxTarget *target) const
 {
-    scanDeviceEndpoint(endpointFromHost(ipv6, port), name);
+    const QList<LogicBoxTarget> valid = targetsForIdentity(name, mac);
+    if (valid.isEmpty())
+        return ResolveStatus::NotFound;
+    if (valid.size() > 1)
+        return ResolveStatus::Ambiguous;
+
+    if (target) {
+        *target = valid.constFirst();
+        if (!name.trimmed().isEmpty())
+            target->name = name.trimmed();
+        if (!mac.trimmed().isEmpty())
+            target->mac = mac.trimmed();
+    }
+    return ResolveStatus::Found;
 }
 
-void plcManager::scanDeviceEndpoint(const LbEndpoint &endpoint,
-                                    const QString &name)
+void plcManager::scanDevice(const QString &host, const QString &name)
 {
-    if (!endpoint.isValid()) {
+    LogicBoxTarget target;
+    target.name = name;
+    target.endpoint = endpointFromHost(host, port);
+    scanDevice(target);
+}
+
+void plcManager::scanDevice(const LogicBoxTarget &target)
+{
+    if (!target.isValid()) {
         emit errorOccurred(QString("Некорректный endpoint для %1: %2. "
                                    "IPv6 link-local должен содержать scope интерфейса.")
-                               .arg(name, endpoint.address.toString()));
+                               .arg(target.displayName(), target.endpoint.address.toString()));
         return;
     }
 
-    rememberEndpoint(name, {}, endpoint);
+    rememberTarget(target);
     debugApp() << "plcManager::Starting process for:"
-               << endpoint.displayString() << name;
+               << target.endpoint.displayString() << target.name;
 
     LBclient *lbc = new LBclient(this);
-    if (!lbc->setEndpoint(endpoint)) {
+    if (!lbc->setEndpoint(target.endpoint)) {
         emit errorOccurred(lbc->getlbDeviceMessage());
         lbc->deleteLater();
         return;
@@ -116,12 +147,12 @@ void plcManager::scanDeviceEndpoint(const LbEndpoint &endpoint,
             });
 
     connect(lbproc, &lbprocess::scanCompleted, this,
-            [endpoint, name, lbc, lbproc, this]
+            [target, lbc, lbproc, this]
             (const QMap<qsizetype, lbprocess::scaninfo>& scan){
                 for (auto i = scan.begin(); i != scan.end(); ++i)
                     debugPLC() << i.key() << i.value();
 
-                emit scanCompleted(endpoint.hostString(), name, scan);
+                emit scanCompleted(target, scan);
                 lbproc->deleteLater();
                 lbc->deleteLater();
             });
@@ -129,43 +160,45 @@ void plcManager::scanDeviceEndpoint(const LbEndpoint &endpoint,
     lbproc->run(lbprocess::scan, {"sys.serial"});
 }
 
-void plcManager::requestConfig(const QString &ipv6, const QString &name)
+void plcManager::requestConfig(const QString &host, const QString &name)
 {
-    requestConfigEndpoint(endpointFromHost(ipv6, port), name);
+    LogicBoxTarget target;
+    target.name = name;
+    target.endpoint = endpointFromHost(host, port);
+    requestConfig(target);
 }
 
-void plcManager::requestConfigEndpoint(const LbEndpoint &endpoint,
-                                       const QString &name)
+void plcManager::requestConfig(const LogicBoxTarget &target)
 {
-    if (!endpoint.isValid()) {
+    if (!target.isValid()) {
         emit errorOccurred(QString("Некорректный endpoint для %1: %2. "
                                    "IPv6 link-local должен содержать scope интерфейса.")
-                               .arg(name, endpoint.address.toString()));
+                               .arg(target.displayName(), target.endpoint.address.toString()));
         return;
     }
 
-    rememberEndpoint(name, {}, endpoint);
+    rememberTarget(target);
     debugApp() << "plcManager::getlbcfg:"
-               << endpoint.displayString() << name;
+               << target.endpoint.displayString() << target.name;
 
     LBclient *lbc = new LBclient(this, {"getconf"});
-    if (!lbc->setEndpoint(endpoint)) {
+    if (!lbc->setEndpoint(target.endpoint)) {
         emit errorOccurred(lbc->getlbDeviceMessage());
         lbc->deleteLater();
         return;
     }
 
     connect(lbc, &LBclient::ExecuteCompletedJson, this,
-            [lbc, this, name, endpoint]
+            [lbc, this, target]
             (const QString& lbhost, const QJsonObject& Qjo,
              const QString& message, const QModbusDevice::Error error){
                 Q_UNUSED(lbhost);
                 if(error == QModbusDevice::NoError){
                     const QString yamlContent = lbyaml::getlbconf(Qjo, lbyaml::retainY);
                     debugApp() << "# BEGIN YAML";
-                    logPLC(name, LogCatcher::Debug, LogCatcher::wrapYes) << yamlContent;
+                    logPLC(target.name, LogCatcher::Debug, LogCatcher::wrapYes) << yamlContent;
                     debugApp() << "# END YAML";
-                    emit configReceived(endpoint.hostString(), name, yamlContent);
+                    emit configReceived(target, yamlContent);
                 } else {
                     debugPLC() << message;
                     emit errorOccurred(message);
@@ -183,6 +216,8 @@ void plcManager::startDiscover()
         return;
 
     emit discoverStarting();
+    targetsByName.clear();
+    targetsByMac.clear();
     discover *wgtdiscover = new discover(this);
 
     connect(wgtdiscover, &discover::discoverCompleted, this,
@@ -197,9 +232,13 @@ void plcManager::startDiscover()
                     return;
                 }
 
-                for (auto it = DiscoverMap.cbegin(); it != DiscoverMap.cend(); ++it)
-                    rememberEndpoint(it.value().name, it.value().mac,
-                                     it.value().endpoint);
+                for (auto it = DiscoverMap.cbegin(); it != DiscoverMap.cend(); ++it) {
+                    LogicBoxTarget target;
+                    target.name = it.value().name;
+                    target.mac = it.value().mac;
+                    target.endpoint = it.value().endpoint;
+                    rememberTarget(target);
+                }
 
                 emit discoverCompleted(DiscoverMap);
                 wgtdiscover->deleteLater();
@@ -217,7 +256,7 @@ bool plcManager::startFirmware(const CommandContext &ctx,
 {
     debugApp() << "PLCManager: startFirmware slot=" << ctx.slot;
 
-    const LbEndpoint endpoint = ctx.resolvedEndpoint(port);
+    const LbEndpoint endpoint = ctx.target.endpoint;
     if (!endpoint.isValid()) {
         emit errorOccurred(QString("Не определён корректный endpoint для %1")
                                .arg(ctx.displayName()));
@@ -275,43 +314,26 @@ void plcManager::stopFirmware()
     emit firmwareFinished();
 }
 
-void plcManager::startConf(const QString &name, const QString &yamlFilePath)
+void plcManager::startConf(const LogicBoxTarget &target,
+                           const QString &yamlFilePath)
 {
-    debugApp() << "plcManager::startConf for" << name;
+    debugApp() << "plcManager::startConf for" << target.name
+               << target.endpoint.displayString();
 
-    // A YAML file contains a link-local address derived from MAC, but it cannot
-    // contain the host's current interface scope. Resolve the target against
-    // endpoints learned by Discover instead of guessing an interface.
-    lbyaml identityParser(yamlFilePath, lbyaml::file);
-    if (identityParser.getErr() != lbyaml::NoError) {
-        emit errorOccurred(QString("Ошибка YAML: %1").arg(identityParser.getErr()));
-        return;
-    }
-
-    QString mac;
-    const QMultiMap<QString, lbyaml::lbhost> hosts = identityParser.getallhostline();
-    const auto values = hosts.values(name);
-    if (!values.isEmpty())
-        mac = values.constFirst().mac;
-
-    const LbEndpoint endpoint = endpointForIdentity(name, mac);
-    if (!endpoint.isValid()) {
-        emit errorOccurred(
-            QString("Не найден сетевой endpoint для ПЛК '%1'%2. "
-                    "Выполните Discover перед конфигурированием, чтобы определить "
-                    "IPv6 link-local scope интерфейса.")
-                .arg(name,
-                     mac.isEmpty() ? QString() : QString(" (MAC %1)").arg(mac)));
+    if (!target.isValid()) {
+        emit errorOccurred(QString("Не определён корректный endpoint для ПЛК '%1'. "
+                                   "Выполните Discover перед конфигурированием.")
+                               .arg(target.displayName()));
         return;
     }
 
     LBclient *lbc = new LBclient(this, {"conf"});
-
-    // setlbHost prepares the YAML payload. Its legacy address selection is
-    // immediately replaced by the authoritative scoped endpoint from Discover
-    // before Execute(), so no connection is attempted with an unscoped address.
-    lbc->setlbHost(name, yamlFilePath);
-    if (!lbc->setEndpoint(endpoint)) {
+    if (!lbc->prepareConfigHost(target.name, yamlFilePath)) {
+        emit errorOccurred(lbc->getlbDeviceMessage());
+        lbc->deleteLater();
+        return;
+    }
+    if (!lbc->setEndpoint(target.endpoint)) {
         emit errorOccurred(lbc->getlbDeviceMessage());
         lbc->deleteLater();
         return;
@@ -329,17 +351,50 @@ void plcManager::startConf(const QString &name, const QString &yamlFilePath)
             });
 
     connect(lbc, &LBclient::lbDisconnect, this,
-            [lbc, name, endpoint, this]
+            [lbc, target, this]
             (const QString& lbhost, const QString& message,
              const QModbusDevice::Error error){
                 Q_UNUSED(lbhost);
                 Q_UNUSED(message);
                 Q_UNUSED(error);
-                emit confCompleted(endpoint.hostString(), name);
+                emit confCompleted(target);
                 lbc->deleteLater();
             });
 
     lbc->Execute();
+}
+
+void plcManager::startConf(const QString &name, const QString &yamlFilePath)
+{
+    lbyaml identityParser(yamlFilePath, lbyaml::file);
+    if (identityParser.getErr() != lbyaml::NoError) {
+        emit errorOccurred(QString("Ошибка YAML: %1").arg(identityParser.getErr()));
+        return;
+    }
+
+    QString mac;
+    const QMultiMap<QString, lbyaml::lbhost> hosts = identityParser.getallhostline();
+    const auto values = hosts.values(name);
+    if (!values.isEmpty())
+        mac = values.constFirst().mac;
+
+    LogicBoxTarget target;
+    const ResolveStatus status = resolveTarget(name, mac, &target);
+    if (status == ResolveStatus::Ambiguous) {
+        emit errorOccurred(QString("ПЛК '%1' доступен через несколько сетевых интерфейсов. "
+                                   "Откройте его через Discover и повторите операцию.")
+                               .arg(name));
+        return;
+    }
+    if (status != ResolveStatus::Found) {
+        emit errorOccurred(QString("Не найден сетевой endpoint для ПЛК '%1'%2. "
+                                   "Выполните Discover перед конфигурированием.")
+                               .arg(name,
+                                    mac.isEmpty() ? QString() : QString(" (MAC %1)").arg(mac)));
+        return;
+    }
+
+    startConf(target, yamlFilePath);
 }
 
 void plcManager::startFirmwareAll(const CommandContext &ctx,
@@ -347,9 +402,9 @@ void plcManager::startFirmwareAll(const CommandContext &ctx,
                                   const QString &checkMessage,
                                   const QString &startMessage)
 {
-    debugApp() << "plcManager::startFirmwareAll" << ctx.name;
+    debugApp() << "plcManager::startFirmwareAll" << ctx.target.name;
 
-    const LbEndpoint endpoint = ctx.resolvedEndpoint(port);
+    const LbEndpoint endpoint = ctx.target.endpoint;
     if (!endpoint.isValid()) {
         emit errorOccurred(QString("Не определён корректный endpoint для %1")
                                .arg(ctx.displayName()));
@@ -401,7 +456,7 @@ void plcManager::startFirmwareAll(const CommandContext &ctx,
 
 void plcManager::startRestartAll(const CommandContext &ctx)
 {
-    const LbEndpoint endpoint = ctx.resolvedEndpoint(port);
+    const LbEndpoint endpoint = ctx.target.endpoint;
     debugApp() << "plcManager::startRestartAll for" << endpoint.displayString();
 
     if (!endpoint.isValid()) {
@@ -446,7 +501,7 @@ void plcManager::startLog(const CommandContext &ctx, const QString &flag)
         return;
     }
 
-    const LbEndpoint endpoint = ctx.resolvedEndpoint(port);
+    const LbEndpoint endpoint = ctx.target.endpoint;
     if (!endpoint.isValid()) {
         emit errorOccurred(QString("Не определён корректный endpoint для %1")
                                .arg(ctx.displayName()));
@@ -505,29 +560,33 @@ WatchSession *plcManager::startWatch(const CommandContext &ctx,
                                      const QStringList &arg,
                                      QObject *p_watchDock)
 {
-    if (activeWatchSessions.contains(ctx.name)) {
-        debugApp() << "WatchSession for key" << ctx.name
-                   << "already exists. Returning existing session.";
-        return activeWatchSessions.value(ctx.name);
+    if (!ctx.target.isValid()) {
+        emit errorOccurred(QString("Не определён корректный endpoint для Watch '%1'. "
+                                   "Для IPv6 link-local используйте scoped endpoint.")
+                               .arg(ctx.displayName()));
+        return nullptr;
     }
 
-    CommandContext normalized = ctx;
-    normalized.setEndpoint(ctx.resolvedEndpoint(port));
+    const QString key = ctx.target.routeKey();
+    if (activeWatchSessions.contains(key)) {
+        debugApp() << "WatchSession for route" << key
+                   << "already exists. Returning existing session.";
+        return activeWatchSessions.value(key);
+    }
 
-    debugApp() << "Creating new WatchSession for key:" << normalized.name
-               << normalized.endpoint.displayString();
+    debugApp() << "Creating new WatchSession for route:" << key
+               << ctx.target.endpoint.displayString();
 
-    WatchSession *session = new WatchSession(normalized, arg, p_watchDock);
-    activeWatchSessions.insert(normalized.name, session);
+    WatchSession *session = new WatchSession(ctx, arg, p_watchDock);
+    activeWatchSessions.insert(key, session);
     emit activeWatchChanged(activeWatchSessions.keys());
 
     connect(session, &WatchSession::watchErrorOccurred,
             this, &plcManager::errorOccurred);
-    connect(session, &QObject::destroyed, this, [this, normalized]() {
-        activeWatchSessions.remove(normalized.name);
+    connect(session, &QObject::destroyed, this, [this, key]() {
+        activeWatchSessions.remove(key);
         emit activeWatchChanged(activeWatchSessions.keys());
-        debugApp() << "WatchSession removed from manager for key:"
-                   << normalized.name;
+        debugApp() << "WatchSession removed from manager for route:" << key;
     });
 
     return session;

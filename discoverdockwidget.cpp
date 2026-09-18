@@ -87,22 +87,23 @@ void DiscoverDockWidget::onTableDoubleClicked(int row, int column)
     if (QApplication::mouseButtons() != Qt::LeftButton) {
         return;
     }
-    QTableWidgetItem *item = table->item(row, 6);
-    if (!item) return;
-    QString ipv6 = item->text();
-    item = table->item(row, 0);
-    QString name = item->text();
-    emit deviceSelected(ipv6,name);
+    const LogicBoxTarget target = targetForRow(row);
+    if (target.isValid())
+        emit deviceSelected(target);
 }
 
 void DiscoverDockWidget::showContextMenu(const QPoint &pos)
 {
     QTableWidgetItem *item = table->itemAt(pos);
     if (!item) return;
+    const int row = item->row();
+    const LogicBoxTarget target = targetForRow(row);
+    if (!target.isValid())
+        return;
+    const QTableWidgetItem *keyItem = table->item(row, 6);
+    const QString discoveryKey = keyItem ? keyItem->text() : QString();
     plcManager::CommandContext ctx;
-
-    ctx.ipv6 = table->item(item->row(), 6)->text();
-    ctx.name = table->item(item->row(), 0)->text();
+    ctx.target = target;
 
     QMenu menu(this);
     QAction *AddDivice = menu.addAction("Добавить");
@@ -127,9 +128,9 @@ void DiscoverDockWidget::showContextMenu(const QPoint &pos)
     QClipboard *clipboard = QGuiApplication::clipboard();
 
     if (selectedItem == AddDivice){
-        emit deviceSelected(ctx.ipv6, ctx.name);
+        emit deviceSelected(ctx.target);
     }else if (selectedItem == copy) {
-        clipboard->setText(ldmap.value(ctx.ipv6).toString());
+        clipboard->setText(ldmap.value(discoveryKey).toString());
     }else if (selectedItem == Allcopy) {
         QStringList qstr;
         for (auto i : ldmap) {
@@ -137,14 +138,14 @@ void DiscoverDockWidget::showContextMenu(const QPoint &pos)
         }
         clipboard->setText(qstr.join("\n"));
     }else if (selectedItem == getConf) {
-        emit deviceSelected(ctx.ipv6, ctx.name);
-        emit requestConfig(ctx.ipv6, ctx.name);
+        emit deviceSelected(ctx.target);
+        emit requestConfig(ctx.target);
     }else if (selectedItem == newConf){
-        emit newConfig(ctx.ipv6, ctx.name);
+        emit newConfig(ctx.target);
     }else if (selectedItem == MacCopy){
-        clipboard->setText(ldmap.value(ctx.ipv6).mac);
+        clipboard->setText(ldmap.value(discoveryKey).mac);
     }else if (selectedItem == ipv6Copy){
-        clipboard->setText(ctx.ipv6);
+        clipboard->setText(ctx.target.endpoint.hostString());
     }
 }
 
@@ -190,6 +191,23 @@ void DiscoverDockWidget::discoverReceived(const QMap<QString, discover::lbinfo> 
         row++;
     }
     table->setSortingEnabled(true); // Возвращаем возможность сортировки
+}
+
+LogicBoxTarget DiscoverDockWidget::targetForRow(int row) const
+{
+    LogicBoxTarget target;
+    QTableWidgetItem *keyItem = table ? table->item(row, 6) : nullptr;
+    if (!keyItem)
+        return target;
+
+    const auto it = ldmap.constFind(keyItem->text());
+    if (it == ldmap.constEnd())
+        return target;
+
+    target.name = it.value().name;
+    target.mac = it.value().mac;
+    target.endpoint = it.value().endpoint;
+    return target;
 }
 
 QMap<QString, discover::lbinfo> DiscoverDockWidget::getLdmap() const

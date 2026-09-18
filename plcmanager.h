@@ -4,11 +4,11 @@
 #include <QObject>
 #include <QPointer>
 #include <QHash>
-#include <QHostAddress>
+#include <QList>
 #include "lbprocess.h"
 #include "discover.h"
 #include "lbclient.h"
-#include "lbendpoint.h"
+#include "logicboxtarget.h"
 
 class WatchSession;
 
@@ -23,75 +23,41 @@ public:
     }
 
     struct CommandContext {
-        QString name;
-
-        // Compatibility/display form. Networking must use resolvedEndpoint().
-        // Keeping it for now avoids breaking all existing UI signals at once.
-        QString ipv6;
-
-        // Canonical network endpoint. IPv6 link-local scope lives inside
-        // endpoint.address.scopeId().
-        LbEndpoint endpoint;
-
+        LogicBoxTarget target;
         int slot = -1;
 
         bool isSlot() const { return slot != -1; }
-
         QString displayName() const {
-            return isSlot() ? QString("%1/slot %2").arg(name).arg(slot) : name;
-        }
-
-        void setEndpoint(const LbEndpoint &value)
-        {
-            endpoint = value;
-            if (!value.address.isNull())
-                ipv6 = value.address.toString();
-        }
-
-        LbEndpoint resolvedEndpoint(quint16 fallbackPort = 502) const
-        {
-            if (endpoint.isValid())
-                return endpoint;
-
-            QString host = ipv6.trimmed();
-            quint16 parsedPort = fallbackPort;
-
-            // Accept [IPv6%scope]:port as a convenience for manually entered
-            // Watch addresses, while the normal internal form stays QHostAddress.
-            if (host.startsWith('[')) {
-                const int closing = host.indexOf(']');
-                if (closing > 0) {
-                    const QString suffix = host.mid(closing + 1);
-                    const QString addressPart = host.mid(1, closing - 1);
-                    if (suffix.startsWith(':')) {
-                        bool ok = false;
-                        const int p = suffix.mid(1).toInt(&ok);
-                        if (ok && p > 0 && p < 65536)
-                            parsedPort = static_cast<quint16>(p);
-                    }
-                    host = addressPart;
-                }
-            }
-
-            QHostAddress address;
-            address.setAddress(host);
-
-            LbEndpoint result;
-            result.address = address;
-            result.port = parsedPort;
-            return result;
+            return isSlot()
+                ? QString("%1/slot %2").arg(target.displayName()).arg(slot)
+                : target.displayName();
         }
     };
 
-    void scanDevice(const QString &ipv6, const QString &name);
-    void requestConfig(const QString &ipv6, const QString &name);
+    enum class ResolveStatus {
+        Found,
+        NotFound,
+        Ambiguous
+    };
+
+    void scanDevice(const LogicBoxTarget &target);
+    void requestConfig(const LogicBoxTarget &target);
     void startDiscover();
+
+    // Legacy/manual-input boundaries. Internal UI flow must use LogicBoxTarget.
+    void scanDevice(const QString &host, const QString &name);
+    void requestConfig(const QString &host, const QString &name);
+
+    QList<LogicBoxTarget> targetsForIdentity(const QString &name, const QString &mac) const;
+    ResolveStatus resolveTarget(const QString &name, const QString &mac,
+                                LogicBoxTarget *target) const;
 
     bool startFirmware(const CommandContext &ctx, const QString &filePath,
                        const QString &checkMessage,
                        const QString &startMessage,
                        const QString &lbkey = "ota");
     void stopFirmware();
+    void startConf(const LogicBoxTarget &target, const QString &yamlFilePath);
     void startConf(const QString &name, const QString &yamlFilePath);
     void startFirmwareAll(const CommandContext &ctx, const QString &filePath,
                           const QString &checkMessage,
@@ -107,11 +73,11 @@ public:
                             const QString &boxTitle,
                             F messageBuilder)
     {
-        const LbEndpoint endpoint = ctx.resolvedEndpoint(port);
+        const LbEndpoint &endpoint = ctx.target.endpoint;
         if (!endpoint.isValid()) {
-            emit errorOccurred(QString("Не определён корректный endpoint для %1 (%2). "
+            emit errorOccurred(QString("Не определён корректный endpoint для %1. "
                                        "Для IPv6 link-local сначала выполните Discover.")
-                                   .arg(ctx.displayName(), ctx.ipv6));
+                                   .arg(ctx.displayName()));
             return;
         }
 
@@ -153,10 +119,9 @@ public:
     QStringList activeWatchKeys() const;
 
 signals:
-    void scanCompleted(const QString &ipv6, const QString &name,
+    void scanCompleted(const LogicBoxTarget &target,
                        const QMap<qsizetype, lbprocess::scaninfo> &scanData);
-    void configReceived(const QString &ipv6, const QString &name,
-                        const QString &yamlContent);
+    void configReceived(const LogicBoxTarget &target, const QString &yamlContent);
     void errorOccurred(const QString &message);
     void eventOccurred(const QString &message);
     void discoverStarting();
@@ -166,7 +131,7 @@ signals:
     void firmwareFinished();
     void logStarted();
     void logFinished();
-    void confCompleted(const QString &ipv6, const QString &name);
+    void confCompleted(const LogicBoxTarget &target);
     void showMessage(const QString &title, const QString &message);
     void restartAllCompleted(const CommandContext &ctx);
     void activeWatchChanged(const QStringList &keys);
@@ -186,26 +151,24 @@ private:
 
     QMap<QString, WatchSession*> activeWatchSessions;
 
-    // Discovery is the authority that binds a LogicBox identity to a scoped
-    // link-local endpoint. Name is convenient, MAC is the stable fallback when
-    // a YAML configuration has been renamed.
-    QHash<QString, LbEndpoint> endpointsByName;
-    QHash<QString, LbEndpoint> endpointsByMac;
+    // Discovery registry is a fallback for YAML/manual flows only. It stores
+    // every discovered route instead of silently overwriting one interface
+    // with another.
+    QHash<QString, QList<LogicBoxTarget>> targetsByName;
+    QHash<QString, QList<LogicBoxTarget>> targetsByMac;
 
     static QString normalizeMac(QString mac);
     static LbEndpoint endpointFromHost(const QString &host,
                                        quint16 endpointPort = port);
-    void rememberEndpoint(const QString &name, const QString &mac,
-                          const LbEndpoint &endpoint);
-    LbEndpoint endpointForIdentity(const QString &name,
-                                   const QString &mac = {}) const;
-
-    void scanDeviceEndpoint(const LbEndpoint &endpoint, const QString &name);
-    void requestConfigEndpoint(const LbEndpoint &endpoint, const QString &name);
+    void rememberTarget(const LogicBoxTarget &target);
+    static void appendUniqueTarget(QList<LogicBoxTarget> &list,
+                                   const LogicBoxTarget &target);
 
     void prcOtaSender(const QString &lbhost, const QStringList &result,
                       const QString &message,
                       const QModbusDevice::Error error);
 };
+
+Q_DECLARE_METATYPE(plcManager::CommandContext)
 
 #endif // PLCMANAGER_H

@@ -12,11 +12,13 @@ class WatchDockWidget : public QDockWidget
 {
     Q_OBJECT
 public:
-    WatchDockWidget(const QString& name, QWidget *parent = nullptr);
+    WatchDockWidget(const LogicBoxTarget &target, QWidget *parent = nullptr);
 
     QString getPlcName() const;
+    const LogicBoxTarget &getTarget() const;
 
-    void setIpv6(const QString &newIpv6);
+    bool setEndpointText(const QString &text);
+    void setTarget(const LogicBoxTarget &target);
     void addVar(const QString &varName = QString());
     void toggleConnection();
     bool isConnected() const;
@@ -25,8 +27,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-    QString plcname;
-    QString ipv6;
+    LogicBoxTarget target;
     QTableView *watch = nullptr;
     QStandardItemModel *watchModel = nullptr;
 

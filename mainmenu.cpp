@@ -128,8 +128,9 @@ void MainMenu::initViewMenu(QMenuBar *menuBar)
     watchMenu->addAction(createWatch);
     connect(createWatch, &QAction::triggered, this, [this](){
         static QAtomicInt counter(0);
-        QString str = QString("new %1").arg(counter.fetchAndAddRelaxed(1) + 1);
-        WatchDockWidget* watch = p_mainWindow->createWatchDockWidget(str);
+        LogicBoxTarget target;
+        target.name = QString("new %1").arg(counter.fetchAndAddRelaxed(1) + 1);
+        WatchDockWidget* watch = p_mainWindow->createWatchDockWidget(target);
         watch->show();
         watch->raise();
         watch->setFocus();
@@ -296,10 +297,11 @@ void MainMenu::onPlcMenuAboutToShow()
         if (!ldmap.isEmpty())
         {
             logMenu->setEnabled(true);
-            plcManager::CommandContext ctx;
             for (auto it = ldmap.begin(); it != ldmap.end(); ++it){
-                ctx.ipv6 = it.key();
-                ctx.name = it.value().name;
+                plcManager::CommandContext ctx;
+                ctx.target.name = it.value().name;
+                ctx.target.mac = it.value().mac;
+                ctx.target.endpoint = it.value().endpoint;
                 CommandManager::instance()->getLogMenu(ctx, logMenu, it.value().name);
             }
         }else
