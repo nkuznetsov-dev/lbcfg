@@ -83,6 +83,8 @@ endif()
 target_sources(lbcfg PRIVATE
     firmwarepackage.cpp
     firmwarepackage.h
+    firmwareanalyzer.cpp
+    firmwareanalyzer.h
 )
 
 target_include_directories(lbcfg PRIVATE

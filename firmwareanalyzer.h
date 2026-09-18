@@ -53,6 +53,12 @@ public:
 
     QByteArray getCheckSum(const QString &moduleName) const;
 
+    // Device-reported sys.version may contain a build date/time suffix while
+    // the repository metadata contains only YYYYMMDDhhmmss-githash. These
+    // helpers reduce both forms to the same comparable value.
+    static QString normalizeVersion(const QString &version);
+    static bool versionsMatch(const QString &left, const QString &right);
+
     Error error() const;
     QString errorString() const;
 

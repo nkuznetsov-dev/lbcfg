@@ -2,6 +2,13 @@
 #include <QVBoxLayout>
 #include <QMenu>
 #include <QMessageBox>
+#include <QFileDialog>
+#include <QSettings>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QBrush>
+#include <QColor>
 #include "logmanager.h"
 #include "commandmanager.h"
 
@@ -19,6 +26,11 @@ DeviceTreeDockWidget::DeviceTreeDockWidget(QWidget *parent)
     treeView->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(treeView, &QTreeView::customContextMenuRequested,
             this, &DeviceTreeDockWidget::showContextMenu);
+    connect(treeView, &QTreeView::expanded,
+            this, &DeviceTreeDockWidget::onTreeExpanded);
+
+    m_firmwareAnalyzer = new firmwareAnalyzer(this);
+
     layout->addWidget(treeView);
     connect(treeView, &QTreeView::doubleClicked, this,
             [this](const QModelIndex &index){
@@ -65,6 +77,9 @@ void DeviceTreeDockWidget::updateDevice(const QString &ipv6, const QString &name
         // Создаем элементы для двух колонок
         QStandardItem *col1 = new QStandardItem(QString("Slot %1: %2").arg(it.key()).arg(info.devtype));
         col1->setData(it.key(), Qt::UserRole);
+        col1->setData(info.devtype, ModuleTypeRole);
+        col1->setData(info.version, InstalledVersionRole);
+        col1->setData(true, ModuleItemRole);
         // 2. Делаем их жирными
         QFont boldFont = col1->font();
         boldFont.setBold(true);
@@ -75,8 +90,15 @@ void DeviceTreeDockWidget::updateDevice(const QString &ipv6, const QString &name
         plcRoot->appendRow(col1);
         // Теперь добавляем подробности ВНУТРЬ (как подветки)
         col1->appendRow(new QStandardItem("MAC: " + info.mac));
-        col1->appendRow(new QStandardItem("Version: " + info.version));
+
+        QStandardItem *versionItem = new QStandardItem("Version: " + info.version);
+        versionItem->setData(true, VersionInfoRole);
+        col1->appendRow(versionItem);
+
         col1->appendRow(new QStandardItem("Serial: " + info.data.value(0)));
+
+        if (m_firmwareLoaded)
+            updateFirmwareStatus(col1);
     }
     // Раскрываем дерево
     treeView->expand(rootIndex);
@@ -98,7 +120,14 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
     // Получаем индекс элемента, на который кликнули
     QModelIndex index = treeView->indexAt(pos);
     if (!index.isValid()) return;
-    bool isRoot = !index.parent().isValid();
+
+    const bool isRoot = !index.parent().isValid();
+    const bool isModule = index.data(ModuleItemRole).toBool();
+
+    // MAC/Version/Serial are informational rows, not command targets.
+    if (!isRoot && !isModule)
+        return;
+
     plcManager::CommandContext ctx;
     if (isRoot) {
         ctx.name = index.data().toString();
@@ -167,6 +196,33 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
                 return QString("Команда на удаление fboot %1 отправлена").arg(ctx.displayName());
             });
         });
+
+        menu.addSeparator();
+
+        QAction *repositoryAction = menu.addAction("Репозиторий прошивок...");
+        connect(repositoryAction, &QAction::triggered, this, [this]() {
+            m_repositoryPromptDeclined = false;
+            if (chooseFirmwareRepository())
+                updateAllFirmwareStatuses();
+        });
+
+        QAction *refreshRepositoryAction = menu.addAction("Обновить версии из репозитория");
+        connect(refreshRepositoryAction, &QAction::triggered, this, [this]() {
+            m_repositoryPromptDeclined = false;
+
+            QString repositoryRoot = m_repositoryRoot;
+            if (repositoryRoot.isEmpty())
+                repositoryRoot = savedFirmwareRepository();
+
+            if (repositoryRoot.isEmpty()) {
+                if (chooseFirmwareRepository())
+                    updateAllFirmwareStatuses();
+                return;
+            }
+
+            if (loadFirmwareRepository(repositoryRoot, true))
+                updateAllFirmwareStatuses();
+        });
     }
     // --- Общие действия ---
     // QAction *getUptime = menu.addAction("Время работы");
@@ -214,6 +270,273 @@ void DeviceTreeDockWidget::showContextMenu(const QPoint &pos)
 
     menu.exec(treeView->viewport()->mapToGlobal(pos));
 
+}
+
+void DeviceTreeDockWidget::onTreeExpanded(const QModelIndex &index)
+{
+    if (!index.isValid())
+        return;
+
+    QStandardItem *moduleItem = treeModel->itemFromIndex(index);
+    if (!moduleItem || !moduleItem->data(ModuleItemRole).toBool())
+        return;
+
+    const QString moduleType = moduleItem->data(ModuleTypeRole).toString().trimmed();
+
+    // There is nothing useful to compare until the module identifies itself.
+    if (moduleType.isEmpty() || moduleType.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0) {
+        if (QStandardItem *versionItem = versionInfoItem(moduleItem)) {
+            versionItem->setBackground(QBrush());
+            versionItem->setToolTip(QStringLiteral("Тип модуля не определён, сравнение версии недоступно"));
+        }
+        return;
+    }
+
+    if (!ensureFirmwareRepository()) {
+        if (QStandardItem *versionItem = versionInfoItem(moduleItem)) {
+            versionItem->setBackground(QBrush());
+            versionItem->setToolTip(QStringLiteral("Репозиторий прошивок не настроен"));
+        }
+        return;
+    }
+
+    updateFirmwareStatus(moduleItem);
+}
+
+QStandardItem *DeviceTreeDockWidget::versionInfoItem(QStandardItem *moduleItem) const
+{
+    if (!moduleItem)
+        return nullptr;
+
+    for (int row = 0; row < moduleItem->rowCount(); ++row) {
+        QStandardItem *child = moduleItem->child(row);
+        if (child && child->data(VersionInfoRole).toBool())
+            return child;
+    }
+
+    return nullptr;
+}
+
+bool DeviceTreeDockWidget::ensureFirmwareRepository()
+{
+    if (m_firmwareLoaded)
+        return true;
+
+    QString repositoryRoot = m_repositoryRoot;
+    if (repositoryRoot.isEmpty())
+        repositoryRoot = savedFirmwareRepository();
+
+    if (!repositoryRoot.isEmpty() && loadFirmwareRepository(repositoryRoot, false))
+        return true;
+
+    if (m_repositoryPromptDeclined)
+        return false;
+
+    return chooseFirmwareRepository();
+}
+
+bool DeviceTreeDockWidget::chooseFirmwareRepository()
+{
+    QString initialPath = m_repositoryRoot;
+    if (initialPath.isEmpty())
+        initialPath = savedFirmwareRepository();
+    if (initialPath.isEmpty() || !QFileInfo(initialPath).isDir())
+        initialPath = QDir::homePath();
+
+    const QString selected = QFileDialog::getExistingDirectory(
+        this,
+        "Выберите каталог репозитория LogicBox",
+        initialPath,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+
+    if (selected.isEmpty()) {
+        // Do not ask again for every module expanded in the same session.
+        m_repositoryPromptDeclined = true;
+        return false;
+    }
+
+    if (!loadFirmwareRepository(selected, true)) {
+        m_repositoryPromptDeclined = true;
+        return false;
+    }
+
+    m_repositoryPromptDeclined = false;
+    return true;
+}
+
+bool DeviceTreeDockWidget::loadFirmwareRepository(const QString &repositoryRoot,
+                                                  bool showErrors)
+{
+    const QFileInfo repositoryInfo(repositoryRoot);
+    if (!repositoryInfo.exists() || !repositoryInfo.isDir()) {
+        if (showErrors) {
+            QMessageBox::warning(this,
+                                 "Репозиторий прошивок",
+                                 QString("Каталог репозитория не найден:\n%1")
+                                     .arg(repositoryRoot));
+        }
+        return false;
+    }
+
+    const QString firmwarePath = QDir(repositoryInfo.absoluteFilePath())
+                                     .filePath(QStringLiteral("firmware"));
+    const QFileInfo firmwareInfo(firmwarePath);
+
+    if (!firmwareInfo.exists() || !firmwareInfo.isDir()) {
+        if (showErrors) {
+            QMessageBox::warning(
+                this,
+                "Репозиторий прошивок",
+                QString("В выбранном каталоге не найдена папка firmware:\n%1")
+                    .arg(firmwarePath));
+        }
+        return false;
+    }
+
+    m_firmwareAnalyzer->setPath(firmwareInfo.absoluteFilePath());
+    m_firmwareAnalyzer->update();
+
+    if (m_firmwareAnalyzer->error() != firmwareAnalyzer::ok) {
+        if (showErrors) {
+            QMessageBox::warning(this,
+                                 "Репозиторий прошивок",
+                                 m_firmwareAnalyzer->errorString());
+        }
+        return false;
+    }
+
+    const QMap<QString, firmwareAnalyzer::fwinfo> firmwareMap =
+        m_firmwareAnalyzer->getFirmwareMap();
+
+    if (firmwareMap.isEmpty()) {
+        if (showErrors) {
+            QMessageBox::warning(
+                this,
+                "Репозиторий прошивок",
+                QString("В каталоге firmware не найдено ни одной распознанной прошивки:\n%1")
+                    .arg(firmwareInfo.absoluteFilePath()));
+        }
+        return false;
+    }
+
+    m_repositoryRoot = repositoryInfo.absoluteFilePath();
+    m_firmwareLoaded = true;
+    saveFirmwareRepository(m_repositoryRoot);
+
+    const QList<firmwareAnalyzer::fwinfo> rejected =
+        m_firmwareAnalyzer->getRejectedFirmware();
+    for (const firmwareAnalyzer::fwinfo &info : rejected) {
+        debugApp() << "Firmware rejected:" << info.sourcePath
+                   << info.err << info.errStr;
+    }
+
+    return true;
+}
+
+QString DeviceTreeDockWidget::settingsFilePath() const
+{
+    // Intentionally build-local. Incremental rebuilds keep the path, deleting
+    // the whole build directory removes it together with the executable.
+    return QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("lbcfg.ini"));
+}
+
+QString DeviceTreeDockWidget::savedFirmwareRepository() const
+{
+    QSettings settings(settingsFilePath(), QSettings::IniFormat);
+    return settings.value(QStringLiteral("Firmware/repositoryRoot")).toString();
+}
+
+void DeviceTreeDockWidget::saveFirmwareRepository(const QString &repositoryRoot) const
+{
+    QSettings settings(settingsFilePath(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("Firmware/repositoryRoot"), repositoryRoot);
+    settings.sync();
+
+    if (settings.status() != QSettings::NoError) {
+        debugApp() << "Failed to save firmware repository path to"
+                   << settingsFilePath();
+    }
+}
+
+void DeviceTreeDockWidget::updateFirmwareStatus(QStandardItem *moduleItem)
+{
+    if (!moduleItem || !m_firmwareLoaded)
+        return;
+
+    QStandardItem *versionItem = versionInfoItem(moduleItem);
+    if (!versionItem)
+        return;
+
+    // A mismatch is not necessarily an error. Start from the normal appearance
+    // and highlight only a confirmed match with the repository version.
+    versionItem->setBackground(QBrush());
+    versionItem->setToolTip(QString());
+
+    const QString moduleType = moduleItem->data(ModuleTypeRole).toString().trimmed();
+    const QString installedVersion = moduleItem->data(InstalledVersionRole).toString().trimmed();
+    const QMap<QString, firmwareAnalyzer::fwinfo> firmwareMap =
+        m_firmwareAnalyzer->getFirmwareMap();
+
+    const auto it = firmwareMap.constFind(moduleType);
+    if (it == firmwareMap.constEnd()) {
+        versionItem->setToolTip(
+            QString("Устройство: %1\nВ репозитории нет распознанной прошивки для %2")
+                .arg(installedVersion, moduleType));
+        return;
+    }
+
+    const firmwareAnalyzer::fwinfo &repositoryFirmware = it.value();
+    const QString repositoryVersion = repositoryFirmware.version.trimmed();
+
+    if (repositoryVersion.isEmpty()
+        || repositoryVersion.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0) {
+        versionItem->setToolTip(
+            QString("Устройство: %1\nФайл: %2\nВерсия прошивки в репозитории не определена")
+                .arg(installedVersion, repositoryFirmware.sourcePath));
+        return;
+    }
+
+    const bool matches = firmwareAnalyzer::versionsMatch(installedVersion,
+                                                         repositoryVersion);
+
+    if (matches) {
+        // Same green used by the application's successful/OK state rows.
+        versionItem->setBackground(QBrush(QColor(QStringLiteral("#C3E6CB"))));
+    }
+
+    versionItem->setToolTip(
+        QString("Модуль: %1\n"
+                "Устройство: %2\n"
+                "Для сравнения: %3\n"
+                "Репозиторий: %4\n"
+                "Статус: %5\n"
+                "Файл: %6")
+            .arg(moduleType,
+                 installedVersion,
+                 firmwareAnalyzer::normalizeVersion(installedVersion),
+                 repositoryVersion,
+                 matches ? QStringLiteral("версии совпадают")
+                         : QStringLiteral("версии не совпадают"),
+                 repositoryFirmware.sourcePath));
+}
+
+void DeviceTreeDockWidget::updateAllFirmwareStatuses()
+{
+    if (!m_firmwareLoaded)
+        return;
+
+    for (int rootRow = 0; rootRow < treeModel->rowCount(); ++rootRow) {
+        QStandardItem *root = treeModel->item(rootRow);
+        if (!root)
+            continue;
+
+        for (int moduleRow = 0; moduleRow < root->rowCount(); ++moduleRow) {
+            QStandardItem *moduleItem = root->child(moduleRow);
+            if (moduleItem && moduleItem->data(ModuleItemRole).toBool())
+                updateFirmwareStatus(moduleItem);
+        }
+    }
 }
 
 QStandardItem *DeviceTreeDockWidget::findPlcRoot(const QString &ipv6)

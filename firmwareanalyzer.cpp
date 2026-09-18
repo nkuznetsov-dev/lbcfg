@@ -12,6 +12,8 @@
 namespace {
 
 const QByteArray EspAppDescMagic = QByteArray::fromHex("3254CDAB");
+const QRegularExpression LogicBoxVersionPattern(
+    QStringLiteral(R"((20\d{12}-[0-9a-fA-F]{7,40}))"));
 
 constexpr qsizetype FirmwareReadLimit = 1024 * 1024;
 constexpr qsizetype VersionOffset = 16;
@@ -71,6 +73,33 @@ QByteArray firmwareAnalyzer::getCheckSum(const QString &moduleName) const
         return {};
 
     return it.value().checksum;
+}
+
+QString firmwareAnalyzer::normalizeVersion(const QString &version)
+{
+    const QString trimmed = version.trimmed();
+    const QRegularExpressionMatch match = LogicBoxVersionPattern.match(trimmed);
+
+    if (match.hasMatch())
+        return match.captured(1).toLower();
+
+    return trimmed;
+}
+
+bool firmwareAnalyzer::versionsMatch(const QString &left, const QString &right)
+{
+    const QString normalizedLeft = normalizeVersion(left);
+    const QString normalizedRight = normalizeVersion(right);
+
+    if (normalizedLeft.isEmpty() || normalizedRight.isEmpty())
+        return false;
+
+    if (normalizedLeft.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0
+        || normalizedRight.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0) {
+        return false;
+    }
+
+    return normalizedLeft.compare(normalizedRight, Qt::CaseInsensitive) == 0;
 }
 
 firmwareAnalyzer::Error firmwareAnalyzer::error() const
@@ -394,11 +423,8 @@ QString firmwareAnalyzer::findEmbeddedVersion(const QByteArray &data)
 {
     // Current LogicBox versions use YYYYMMDDhhmmss-githash, for example
     // 20260806143356-7e0c291. This is only a fallback for non-ESP firmware.
-    static const QRegularExpression versionPattern(
-        QStringLiteral(R"((20\d{12}-[0-9a-fA-F]{7,40}))"));
-
     const QRegularExpressionMatch match =
-        versionPattern.match(QString::fromLatin1(data));
+        LogicBoxVersionPattern.match(QString::fromLatin1(data));
 
     return match.hasMatch() ? match.captured(1) : QString();
 }
